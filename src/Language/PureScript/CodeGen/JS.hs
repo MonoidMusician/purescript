@@ -186,7 +186,7 @@ moduleToJs (Module coms mn imps exps foreigns decls) foreign_ =
   valueToJs' (ObjectUpdate _ o ps) = do
     obj <- valueToJs o
     sts <- mapM (sndM valueToJs) ps
-    extendObj obj sts
+    extendObj (shouldCopyInPlace o) obj sts
   valueToJs' e@(Abs (_, _, _, Just IsTypeClassConstructor) _ _) =
     let args = unAbs e
     in return $ AST.Function Nothing Nothing (map identToJs args) (AST.Block Nothing $ map assign args)
@@ -260,24 +260,38 @@ moduleToJs (Module coms mn imps exps foreigns decls) foreign_ =
   literalToValueJS (ArrayLiteral xs) = AST.ArrayLiteral Nothing <$> mapM valueToJs xs
   literalToValueJS (ObjectLiteral ps) = AST.ObjectLiteral Nothing <$> mapM (sndM valueToJs) ps
 
-  -- | Shallow copy an object.
-  extendObj :: AST -> [(PSString, AST)] -> m AST
-  extendObj obj sts = do
+  shouldCopyInPlace :: Expr Ann -> Bool
+  shouldCopyInPlace (Literal _ (ObjectLiteral _)) = True
+  shouldCopyInPlace (App _ (Var (_, _, _, Just IsTypeClassConstructor) _) _) = True
+  shouldCopyInPlace (ObjectUpdate _ o _) = shouldCopyInPlace o
+  shouldCopyInPlace (Let _ [NonRec _ _ e] _) = shouldCopyInPlace e
+  shouldCopyInPlace _ = True
+
+  -- | Shallow copy an object, or just assign over the top (if inPlace is true).
+  extendObj :: Bool -> AST -> [(PSString, AST)] -> m AST
+  extendObj inPlace obj sts = do
     newObj <- freshName
-    key <- freshName
-    evaluatedObj <- freshName
     let
-      jsKey = AST.Var Nothing key
       jsNewObj = AST.Var Nothing newObj
-      jsEvaluatedObj = AST.Var Nothing evaluatedObj
-      block = AST.Block Nothing (evaluate:objAssign:copy:extend ++ [AST.Return Nothing jsNewObj])
-      evaluate = AST.VariableIntroduction Nothing evaluatedObj (Just obj)
-      objAssign = AST.VariableIntroduction Nothing newObj (Just $ AST.ObjectLiteral Nothing [])
-      copy = AST.ForIn Nothing key jsEvaluatedObj $ AST.Block Nothing [AST.IfElse Nothing cond assign Nothing]
-      cond = AST.App Nothing (accessorString "call" (accessorString "hasOwnProperty" (AST.ObjectLiteral Nothing []))) [jsEvaluatedObj, jsKey]
-      assign = AST.Block Nothing [AST.Assignment Nothing (AST.Indexer Nothing jsKey jsNewObj) (AST.Indexer Nothing jsKey jsEvaluatedObj)]
+      mkBlock statements = AST.Block Nothing (statements ++ extend ++ [AST.Return Nothing jsNewObj])
+      mkEval n = AST.VariableIntroduction Nothing n (Just obj)
       stToAssign (s, js) = AST.Assignment Nothing (accessorString s jsNewObj) js
       extend = map stToAssign sts
+    block <- if inPlace
+      then do
+        return $ mkBlock (mkEval newObj : [])
+      else do
+        key <- freshName
+        evaluatedObj <- freshName
+        let
+          jsKey = AST.Var Nothing key
+          jsEvaluatedObj = AST.Var Nothing evaluatedObj
+          block = mkBlock (mkEval evaluatedObj:objAssign:copy:[])
+          objAssign = AST.VariableIntroduction Nothing newObj (Just $ AST.ObjectLiteral Nothing [])
+          copy = AST.ForIn Nothing key jsEvaluatedObj $ AST.Block Nothing [AST.IfElse Nothing cond assign Nothing]
+          cond = AST.App Nothing (accessorString "call" (accessorString "hasOwnProperty" (AST.ObjectLiteral Nothing []))) [jsEvaluatedObj, jsKey]
+          assign = AST.Block Nothing [AST.Assignment Nothing (AST.Indexer Nothing jsKey jsNewObj) (AST.Indexer Nothing jsKey jsEvaluatedObj)]
+        return block
     return $ AST.App Nothing (AST.Function Nothing Nothing [] block) []
 
   -- | Generate code in the simplified JavaScript intermediate representation for a reference to a
