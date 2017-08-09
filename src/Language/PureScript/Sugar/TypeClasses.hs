@@ -299,13 +299,15 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
             , let tyArgs = map (replaceAllTypeVars (zip (map fst typeClassArguments) tys)) suTyArgs
             ]
 
-      let dependencies = map (S.empty,) members
+      let dependencies = map (addDependencies (S.fromList (map fst members))) members
 
       (remaining, start) <- case addLayer S.empty dependencies of
         (errors, []) -> throwError . errorMessage $ OverlappingNamesInLet -- FIXME
         layer -> pure layer
 
-      let props = Literal $ ObjectLiteral $ map (first mkString) (start ++ superclasses)
+      let placeholders = map (second (const $ Var (Qualified Nothing (Ident "undefined"))) . snd) remaining
+
+      let props = Literal $ ObjectLiteral $ map (first mkString) (start ++ superclasses ++ placeholders)
           dictTy = foldl TypeApp (TypeConstructor (fmap coerceProperName className)) tys
           constrainedTy = quantify (foldr ConstrainedType dictTy deps)
           rawDict = TypeClassDictionaryConstructorApp className props
@@ -343,6 +345,27 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
     (more, some) -> recurse more
       (S.union provided $ S.fromList $ map fst some)
       (ObjectUpdate e $ map (first mkString) some)
+
+  usedImmediateIdents :: S.Set Text -> Expr -> S.Set Text
+  usedImmediateIdents incl e =
+    let (_, f, _, _, _) = everythingWithContextOnValues True S.empty S.union def usedNamesE def def def
+    in f e
+    where
+    Qualified moduleName _ = className
+
+    def s _ = (s, S.empty)
+
+    usedNamesE :: Bool -> Expr -> (Bool, S.Set Text)
+    usedNamesE True (Var (Qualified moduleName' name))
+      | moduleName == moduleName'
+      , i <- runIdent name
+      , i `S.member` incl
+      = (True, S.singleton i)
+    usedNamesE True (Abs _ _) = (False, S.empty)
+    usedNamesE scope _ = (scope, S.empty)
+
+  addDependencies :: S.Set Text -> (Text, Expr) -> (S.Set Text, (Text, Expr))
+  addDependencies incl v@(_, e) = (usedImmediateIdents incl e, v)
 
 typeClassMemberName :: Declaration -> Text
 typeClassMemberName (TypeDeclaration _ ident _) = runIdent ident
