@@ -14,9 +14,11 @@ import           Control.Arrow (first, second)
 import           Control.Monad.Error.Class (MonadError(..))
 import           Control.Monad.State
 import           Control.Monad.Supply.Class
+import           Data.Either (partitionEithers)
 import           Data.List ((\\), find, sortBy)
 import qualified Data.Map as M
 import           Data.Maybe (catMaybes, mapMaybe, isJust)
+import qualified Data.Set as S
 import           Data.Text (Text)
 import qualified Language.PureScript.Constants as C
 import           Language.PureScript.Crash
@@ -297,11 +299,18 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
             , let tyArgs = map (replaceAllTypeVars (zip (map fst typeClassArguments) tys)) suTyArgs
             ]
 
-      let props = Literal $ ObjectLiteral $ map (first mkString) (members ++ superclasses)
+      let dependencies = map (S.empty,) members
+
+      (remaining, start) <- case addLayer S.empty dependencies of
+        (errors, []) -> throwError . errorMessage $ OverlappingNamesInLet -- FIXME
+        layer -> pure layer
+
+      let props = Literal $ ObjectLiteral $ map (first mkString) (start ++ superclasses)
           dictTy = foldl TypeApp (TypeConstructor (fmap coerceProperName className)) tys
           constrainedTy = quantify (foldr ConstrainedType dictTy deps)
-          dict = TypeClassDictionaryConstructorApp className props
-          result = ValueDeclaration sa name Private [] [MkUnguarded (TypedValue True dict constrainedTy)]
+          rawDict = TypeClassDictionaryConstructorApp className props
+      fullDict <- either (const (throwError . errorMessage $ OverlappingNamesInLet)) pure $ recurse remaining (S.fromList (map fst start)) rawDict
+      let result = ValueDeclaration sa name Private [] [MkUnguarded (TypedValue True fullDict constrainedTy)]
       return result
 
   where
@@ -316,6 +325,24 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
     _ <- maybe (throwError . errorMessage $ ExtraneousClassMember ident className) return $ lookup ident tys'
     return val
   memberToValue _ _ = internalError "Invalid declaration in type instance definition"
+
+  -- Given the method/member dependencies satisfied already,
+  --   return the next layer that can be added and the remaining
+  addLayer :: S.Set Text -> [(S.Set Text, (Text, Expr))] -> ([(S.Set Text, (Text, Expr))], [(Text, Expr)])
+  addLayer provided remaining =
+    let
+      check (ids, d) = case ids S.\\ provided of
+        m | S.null m -> Right d
+        m -> Left (m, d)
+    in partitionEithers $ map check remaining
+
+  recurse :: [(S.Set Text, (Text, Expr))] -> S.Set Text -> Expr -> Either [(Text, S.Set Text)] Expr
+  recurse [] _ e = Right e
+  recurse remaining provided e = case addLayer provided remaining of
+    (errors, []) -> Left $ map (\(ids, (n, _)) -> (n, ids)) errors
+    (more, some) -> recurse more
+      (S.union provided $ S.fromList $ map fst some)
+      (ObjectUpdate e $ map (first mkString) some)
 
 typeClassMemberName :: Declaration -> Text
 typeClassMemberName (TypeDeclaration _ ident _) = runIdent ident
