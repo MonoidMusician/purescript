@@ -101,12 +101,8 @@ moduleToCoreFn env (A.Module modSS coms mn decls (Just exps)) =
     exprToCoreFn ss com (Just ty) v
   exprToCoreFn ss com ty (A.Let ds v) =
     Let (ss, com, ty, Nothing) (concatMap declToCoreFn ds) (exprToCoreFn ss [] Nothing v)
-  exprToCoreFn ss com ty (A.TypeClassDictionaryConstructorApp name (A.TypedValue _ lit@(A.Literal (A.ObjectLiteral _)) _)) =
-    exprToCoreFn ss com ty (A.TypeClassDictionaryConstructorApp name lit)
-  exprToCoreFn ss com _ (A.TypeClassDictionaryConstructorApp name (A.Literal (A.ObjectLiteral vs))) =
-    let args = fmap (exprToCoreFn ss [] Nothing . snd) $ sortBy (compare `on` fst) vs
-        ctor = Var (ss, [], Nothing, Just IsTypeClassConstructor) (fmap properToIdent name)
-    in foldl (App (ss, com, Nothing, Nothing)) ctor args
+  exprToCoreFn ss com ty (A.TypeClassDictionaryConstructorApp name dict) =
+    instanceConstructor ss com name dict
   exprToCoreFn ss com ty  (A.TypeClassDictionaryAccessor _ ident) =
     Abs (ss, com, ty, Nothing) (Ident "dict")
       (Accessor (ssAnn ss) (mkString $ runIdent ident) (Var (ssAnn ss) $ Qualified Nothing (Ident "dict")))
@@ -114,6 +110,39 @@ moduleToCoreFn env (A.Module modSS coms mn decls (Just exps)) =
     exprToCoreFn ss (com ++ com1) ty v
   exprToCoreFn _ _ _ e =
     error $ "Unexpected value in exprToCoreFn mn: " ++ show e
+
+  instanceConstructor :: SourceSpan -> [Comment] -> Qualified (ProperName 'ClassName) -> A.Expr -> Expr Ann
+  instanceConstructor ss com name e = case e of
+    A.TypedValue _ lit _ -> instanceConstructor ss com name lit
+    A.Literal (A.ObjectLiteral vs) -> mkApp $ mkArgs (conv vs)
+    A.ObjectUpdate o rs ->
+      let
+        go obj updates mkupdates = case obj of
+            A.Literal (A.ObjectLiteral ol) ->
+              (mkupdates, (conv ol ++ fmap undef updates))
+            A.ObjectUpdate inner more ->
+              go inner (more ++ updates) (mkUpdate more . mkupdates)
+            _ -> error $ "Unexpected value in instanceConstructor: " ++ show obj
+        (mkupdates, args) = go o rs id
+      in Let sa
+        [ NonRec sa unqdef (Literal sa (ObjectLiteral []))
+        , NonRec sa unq (mkApp $ mkArgs args)
+        ] (mkupdates . Var sa $ Qualified Nothing unq)
+    _ -> error $ "Unexpected value in instanceConstructor: " ++ show e
+    where
+    sa = (ss, [], Nothing, Nothing)
+    conv = fmap (second (exprToCoreFn ss [] Nothing))
+    unqdef = Ident "undefined"
+    undefn = Qualified Nothing (unqdef)
+    undef = second $ const $ Var sa (undefn)
+    mkUpdate updates obj =
+      ObjectUpdate (ss, com, Nothing, Nothing) obj
+      $ fmap (second (exprToCoreFn ss [] Nothing)) updates
+    mkArgs = fmap snd . sortBy (compare `on` fst)
+    idname = fmap properToIdent name
+    unq = Ident $ (mappend "__temp_") $ runProperName $ disqualify name
+    ctor = Var (ss, [], Nothing, Just IsTypeClassConstructor) idname
+    mkApp = foldl (App sa) ctor
 
   -- | Desugars case alternatives from AST to CoreFn representation.
   altToCoreFn :: SourceSpan -> A.CaseAlternative -> CaseAlternative Ann

@@ -305,14 +305,21 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
         (errors, []) -> throwError . errorMessage $ OverlappingNamesInLet -- FIXME
         layer -> pure layer
 
-      let placeholders = map (second (const $ Var (Qualified Nothing (Ident "undefined"))) . snd) remaining
+      --let placeholders = map (second (const $ Var (Qualified Nothing (Ident "undefined"))) . snd) remaining
 
-      let props = Literal $ ObjectLiteral $ map (first mkString) (start ++ superclasses ++ placeholders)
+      let props = Literal $ ObjectLiteral $ map (first mkString) (start ++ superclasses)
           dictTy = foldl TypeApp (TypeConstructor (fmap coerceProperName className)) tys
           constrainedTy = quantify (foldr ConstrainedType dictTy deps)
-          rawDict = TypeClassDictionaryConstructorApp className props
-      fullDict <- either (const (throwError . errorMessage $ OverlappingNamesInLet)) pure $ recurse remaining (S.fromList (map fst start)) rawDict
-      let result = ValueDeclaration sa name Private [] [MkUnguarded (TypedValue True fullDict constrainedTy)]
+      rawDict <-
+        case remaining of
+          [] -> pure props
+          _ ->
+              either (const (throwError . errorMessage $ OverlappingNamesInLet)) pure
+              $ recurse remaining (S.fromList (map fst start))
+              -- introduce another binding so members have access to it
+              props -- $ Let [ValueDeclaration sa name Private [] [MkUnguarded props]] $ Var (Qualified Nothing name)
+      let fullDict = TypeClassDictionaryConstructorApp className rawDict
+          result = ValueDeclaration sa name Private [] [MkUnguarded (TypedValue False fullDict constrainedTy)]
       return result
 
   where
@@ -356,16 +363,17 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
     def s _ = (s, S.empty)
 
     usedNamesE :: Bool -> Expr -> (Bool, S.Set Text)
-    usedNamesE True (Var (Qualified moduleName' name))
+    usedNamesE True (Var (Qualified moduleName' n))
       | moduleName == moduleName'
-      , i <- runIdent name
+      , i <- runIdent n
       , i `S.member` incl
       = (True, S.singleton i)
     usedNamesE True (Abs _ _) = (False, S.empty)
     usedNamesE scope _ = (scope, S.empty)
 
   addDependencies :: S.Set Text -> (Text, Expr) -> (S.Set Text, (Text, Expr))
-  addDependencies incl v@(_, e) = (usedImmediateIdents incl e, v)
+  addDependencies _ v@(_, App _ _) = (S.empty, v)
+  addDependencies incl v@(n, e) = (usedImmediateIdents incl e, v)
 
 typeClassMemberName :: Declaration -> Text
 typeClassMemberName (TypeDeclaration _ ident _) = runIdent ident
