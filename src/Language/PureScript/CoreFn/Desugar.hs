@@ -113,7 +113,7 @@ moduleToCoreFn env (A.Module modSS coms mn decls (Just exps)) =
 
   instanceConstructor :: SourceSpan -> [Comment] -> Qualified (ProperName 'ClassName) -> A.Expr -> Expr Ann
   instanceConstructor ss com name e = case e of
-    A.TypedValue _ lit _ -> instanceConstructor ss com name lit
+    A.TypedValue _ e' _ -> instanceConstructor ss com name e'
     A.Literal (A.ObjectLiteral vs) -> mkApp $ mkArgs (conv vs)
     A.ObjectUpdate o rs ->
       let
@@ -122,6 +122,7 @@ moduleToCoreFn env (A.Module modSS coms mn decls (Just exps)) =
               (mkupdates, (conv ol ++ fmap undef updates))
             A.ObjectUpdate inner more ->
               go inner (more ++ updates) (mkUpdate more . mkupdates)
+            A.TypedValue _ obj' _ -> go obj' updates mkupdates
             _ -> error $ "Unexpected value in instanceConstructor: " ++ show obj
         (mkupdates, args) = go o rs id
       in Let sa

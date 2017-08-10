@@ -305,9 +305,9 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
         (errors, []) -> throwError . errorMessage $ OverlappingNamesInLet -- FIXME
         layer -> pure layer
 
-      --let placeholders = map (second (const $ Var (Qualified Nothing (Ident "undefined"))) . snd) remaining
+      let placeholders = map (second (const $ (Literal (ObjectLiteral []))) . snd) remaining
 
-      let props = Literal $ ObjectLiteral $ map (first mkString) (start ++ superclasses)
+      let props = Literal $ ObjectLiteral $ map (first mkString) (start ++ superclasses ++ placeholders)
           dictTy = foldl TypeApp (TypeConstructor (fmap coerceProperName className)) tys
           constrainedTy = quantify (foldr ConstrainedType dictTy deps)
       rawDict <-
@@ -316,10 +316,11 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
           _ ->
               either (const (throwError . errorMessage $ OverlappingNamesInLet)) pure
               $ recurse remaining (S.fromList (map fst start))
-              -- introduce another binding so members have access to it
-              props -- $ Let [ValueDeclaration sa name Private [] [MkUnguarded props]] $ Var (Qualified Nothing name)
-      let fullDict = TypeClassDictionaryConstructorApp className rawDict
-          result = ValueDeclaration sa name Private [] [MkUnguarded (TypedValue False fullDict constrainedTy)]
+              $ props
+          -- introduce another binding so members have access to it
+      let fullDict = Let [ValueDeclaration sa name Private [] [MkUnguarded props]]
+            $ TypedValue True (TypeClassDictionaryConstructorApp className rawDict) constrainedTy
+          result = ValueDeclaration sa name Private [] [MkUnguarded fullDict]
       return result
 
   where
