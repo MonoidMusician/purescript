@@ -318,8 +318,14 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
               $ recurse remaining (S.fromList (map fst start))
               $ props
           -- introduce another binding so members have access to it
-      let fullDict = Let [ValueDeclaration sa name Private [] [MkUnguarded props]]
-            $ TypedValue True (TypeClassDictionaryConstructorApp className rawDict) constrainedTy
+      let fullDict =
+            TypedValue True (TypeClassDictionaryConstructorApp className
+              $ Let
+                [ ValueDeclaration sa name Private []
+                  [ MkUnguarded props ]
+                ]
+              $ rawDict
+            ) constrainedTy
           result = ValueDeclaration sa name Private [] [MkUnguarded fullDict]
       return result
 

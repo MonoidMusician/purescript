@@ -115,33 +115,30 @@ moduleToCoreFn env (A.Module modSS coms mn decls (Just exps)) =
   instanceConstructor ss com name e = case e of
     A.TypedValue _ e' _ -> instanceConstructor ss com name e'
     A.Literal (A.ObjectLiteral vs) -> mkApp $ mkArgs (conv vs)
-    A.ObjectUpdate o rs ->
-      let
-        go obj updates mkupdates = case obj of
-            A.Literal (A.ObjectLiteral ol) ->
-              (mkupdates, (conv ol ++ fmap undef updates))
-            A.ObjectUpdate inner more ->
-              go inner (more ++ updates) (mkUpdate more . mkupdates)
-            A.TypedValue _ obj' _ -> go obj' updates mkupdates
-            _ -> error $ "Unexpected value in instanceConstructor: " ++ show obj
-        (mkupdates, args) = go o rs id
-      in Let sa
-        [ NonRec sa unqdef (Literal sa (ObjectLiteral []))
-        , NonRec sa unq (mkApp $ mkArgs args)
-        ] (mkupdates . Var sa $ Qualified Nothing unq)
+    A.Let
+      [ A.ValueDeclaration _ instanceName _ _ _ ]
+      o ->
+        let
+          go obj mkupdates = case obj of
+              A.Literal (A.ObjectLiteral ol) ->
+                (mkupdates, conv ol)
+              A.ObjectUpdate inner more ->
+                go inner (mkUpdate more . mkupdates)
+              A.TypedValue _ obj' _ -> go obj' mkupdates
+              _ -> error $ "Unexpected value inside instanceConstructor: " ++ show obj
+          (mkupdates, args) = go o id
+        in Let sa
+          [ NonRec sa instanceName (mkApp $ mkArgs args)
+          ] (mkupdates . Var sa $ Qualified Nothing instanceName)
     _ -> error $ "Unexpected value in instanceConstructor: " ++ show e
     where
     sa = (ss, [], Nothing, Nothing)
     conv = fmap (second (exprToCoreFn ss [] Nothing))
-    unqdef = Ident "undefined"
-    undefn = Qualified Nothing (unqdef)
-    undef = second $ const $ Var sa (undefn)
     mkUpdate updates obj =
       ObjectUpdate (ss, com, Nothing, Nothing) obj
       $ fmap (second (exprToCoreFn ss [] Nothing)) updates
     mkArgs = fmap snd . sortBy (compare `on` fst)
     idname = fmap properToIdent name
-    unq = Ident $ (mappend "__temp_") $ runProperName $ disqualify name
     ctor = Var (ss, [], Nothing, Just IsTypeClassConstructor) idname
     mkApp = foldl (App sa) ctor
 
