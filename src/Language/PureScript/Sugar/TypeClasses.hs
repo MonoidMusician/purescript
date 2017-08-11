@@ -314,18 +314,13 @@ typeInstanceDictionaryDeclaration sa name mn deps className tys decls =
         case remaining of
           [] -> pure props
           _ ->
-              either (const (throwError . errorMessage $ OverlappingNamesInLet)) pure
+              either (const (throwError . errorMessage $ OverlappingNamesInLet))
+              (pure . Let [ ValueDeclaration sa name Private [] [ MkUnguarded props ] ])
               $ recurse remaining (S.fromList (map fst start))
               $ props
           -- introduce another binding so members have access to it
       let fullDict =
-            TypedValue True (TypeClassDictionaryConstructorApp className
-              $ Let
-                [ ValueDeclaration sa name Private []
-                  [ MkUnguarded props ]
-                ]
-              $ rawDict
-            ) constrainedTy
+            TypedValue True (TypeClassDictionaryConstructorApp className rawDict) constrainedTy
           result = ValueDeclaration sa name Private [] [MkUnguarded fullDict]
       return result
 
