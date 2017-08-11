@@ -95,6 +95,9 @@ data ConstraintData
   -- not matched, and a flag indicating whether the list was truncated or not.
   -- Note: we use 'Text' here because using 'Binder' would introduce a cyclic
   -- dependency in the module graph.
+  | UsedMethods [Text]
+  -- ^ Tag a constraint with the members needed from the type class, to allow
+  -- it to fill in as a member of the class.
   deriving (Show, Eq, Ord, Generic)
 
 instance NFData ConstraintData

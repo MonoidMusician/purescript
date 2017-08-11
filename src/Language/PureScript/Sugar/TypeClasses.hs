@@ -254,7 +254,7 @@ typeClassMemberToDictionaryAccessor mn name args (TypeDeclaration sa ident ty) =
   in ValueDeclaration sa ident Private [] $
     [MkUnguarded (
      TypedValue False (TypeClassDictionaryAccessor className ident) $
-       moveQuantifiersToFront (quantify (ConstrainedType (Constraint className (map (TypeVar . fst) args) Nothing) ty))
+       moveQuantifiersToFront (quantify (ConstrainedType (Constraint className (map (TypeVar . fst) args) (Just $ UsedMethods [runIdent ident])) ty))
     )]
 typeClassMemberToDictionaryAccessor _ _ _ _ = internalError "Invalid declaration in type class definition"
 
