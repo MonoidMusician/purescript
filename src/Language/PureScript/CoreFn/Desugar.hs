@@ -129,7 +129,7 @@ moduleToCoreFn env (A.Module modSS coms mn decls (Just exps)) =
           (mkupdates, args) = go o id
         in Let sa
           [ NonRec sa instanceName (mkApp $ mkArgs args)
-          ] (mkupdates . Var sa $ Qualified Nothing instanceName)
+          ] (mkupdates . Var (ss, [], Nothing, Just IsTypeClassConstructor) $ Qualified Nothing instanceName)
     _ -> error $ "Unexpected value in instanceConstructor: " ++ show e
     where
     sa = (ss, [], Nothing, Nothing)

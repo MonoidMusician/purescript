@@ -260,33 +260,45 @@ moduleToJs (Module coms mn imps exps foreigns decls) foreign_ =
   literalToValueJS (ArrayLiteral xs) = AST.ArrayLiteral Nothing <$> mapM valueToJs xs
   literalToValueJS (ObjectLiteral ps) = AST.ObjectLiteral Nothing <$> mapM (sndM valueToJs) ps
 
-  shouldCopyInPlace :: Expr Ann -> Bool
-  shouldCopyInPlace (Literal _ (ObjectLiteral _)) = True
-  shouldCopyInPlace (App _ (Var (_, _, _, Just IsTypeClassConstructor) _) _) = True
+  shouldCopyInPlace :: Expr Ann -> Either Bool Text
+  shouldCopyInPlace (Literal _ (ObjectLiteral _)) = Left True
+  shouldCopyInPlace (Var (_, _, _, Just IsTypeClassConstructor) (Qualified Nothing n)) = Right (runIdent n)
+  shouldCopyInPlace (App _ (Var (_, _, _, Just IsTypeClassConstructor) _) _) = Left True
+  shouldCopyInPlace (App _ (App _ inner _) _) = shouldCopyInPlace inner
   shouldCopyInPlace (ObjectUpdate _ o _) = shouldCopyInPlace o
-  shouldCopyInPlace (Let _ [NonRec _ _ e] _) = shouldCopyInPlace e
-  shouldCopyInPlace _ = True
+  shouldCopyInPlace (Let _ [NonRec _ n _] e) =
+    case shouldCopyInPlace e of
+      Left False -> Left False
+      _ -> Right (runIdent n)
+  shouldCopyInPlace _ = Left False
 
   -- | Shallow copy an object, or just assign over the top (if inPlace is true).
-  extendObj :: Bool -> AST -> [(PSString, AST)] -> m AST
-  extendObj inPlace obj sts = do
-    newObj <- freshName
+  extendObj :: Either Bool Text -> AST -> [(PSString, AST)] -> m AST
+  extendObj varInPlace obj sts = do
+    let inPlace = case varInPlace of
+          Left b -> b
+          Right _ -> True
+    newObj <- case varInPlace of
+      Left _ -> freshName
+      Right n -> pure n
     let
       jsNewObj = AST.Var Nothing newObj
       mkBlock statements = AST.Block Nothing (statements ++ extend ++ [AST.Return Nothing jsNewObj])
-      mkEval n = AST.VariableIntroduction Nothing n (Just obj)
+      mkEval n = case varInPlace of
+        Left _ -> [AST.VariableIntroduction Nothing n (Just obj)]
+        Right _ -> []
       stToAssign (s, js) = AST.Assignment Nothing (accessorString s jsNewObj) js
       extend = map stToAssign sts
     block <- if inPlace
       then do
-        return $ mkBlock (mkEval newObj : [])
+        return $ mkBlock (mkEval newObj)
       else do
         key <- freshName
         evaluatedObj <- freshName
         let
           jsKey = AST.Var Nothing key
           jsEvaluatedObj = AST.Var Nothing evaluatedObj
-          block = mkBlock (mkEval evaluatedObj:objAssign:copy:[])
+          block = mkBlock (mkEval evaluatedObj ++ objAssign:copy:[])
           objAssign = AST.VariableIntroduction Nothing newObj (Just $ AST.ObjectLiteral Nothing [])
           copy = AST.ForIn Nothing key jsEvaluatedObj $ AST.Block Nothing [AST.IfElse Nothing cond assign Nothing]
           cond = AST.App Nothing (accessorString "call" (accessorString "hasOwnProperty" (AST.ObjectLiteral Nothing []))) [jsEvaluatedObj, jsKey]
