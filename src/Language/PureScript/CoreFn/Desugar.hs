@@ -128,11 +128,13 @@ moduleToCoreFn env (A.Module modSS coms mn decls (Just exps)) =
               _ -> error $ "Unexpected value inside instanceConstructor: " ++ show obj
           (mkupdates, args) = go o id
         in Let sa
-          [ NonRec sa instanceName (mkApp $ mkArgs args)
-          ] (mkupdates . Var (ss, [], Nothing, Just IsTypeClassConstructor) $ Qualified Nothing instanceName)
+          [ NonRec tagged instanceName (mkApp $ mkArgs args)
+          ] (mkupdates . Var tagged $ Qualified Nothing instanceName)
     _ -> error $ "Unexpected value in instanceConstructor: " ++ show e
     where
     sa = (ss, [], Nothing, Nothing)
+    -- special tag to hack the compiler (should be IsTypeClassInstance)
+    tagged = (ss, [], Nothing, Just IsTypeClassConstructor)
     conv = fmap (second (exprToCoreFn ss [] Nothing))
     mkUpdate updates obj =
       ObjectUpdate (ss, com, Nothing, Nothing) obj
