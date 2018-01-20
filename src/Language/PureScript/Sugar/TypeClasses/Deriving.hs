@@ -99,7 +99,7 @@ deriveInstances externs (Module ss coms mn ds exts) =
 
         fromLocalDecl (TypeClassDeclaration _ cl args cons deps _) =
           NewtypeDerivedInstances (M.singleton (mn, cl) (map fst args, cons, deps)) mempty
-        fromLocalDecl (TypeInstanceDeclaration _ _ _ _ _ cl tys _) =
+        fromLocalDecl (TypeInstanceDeclaration _ _ _ _ _ cl tys NewtypeInstance) =
           foldMap (\nm -> NewtypeDerivedInstances mempty (S.singleton (qualify mn cl, nm))) (extractNewtypeName mn tys)
         fromLocalDecl _ = mempty
 
@@ -237,7 +237,7 @@ deriveNewtypeInstance ss mn syns ndis className ds tys tyConNm dargs = do
                   -- be possible, so we warn again.
                   for_ (extractNewtypeName mn tys) $ \nm ->
                     unless ((constraintClass', nm) `S.member` ndiDerivedInstances ndis) $
-                      tell . errorMessage' ss $ MissingNewtypeSuperclassInstance constraintClass className tys
+                      throwError . errorMessage' ss $ MissingNewtypeSuperclassInstance constraintClass className tys
                 else tell . errorMessage' ss $ UnverifiableSuperclassInstance constraintClass className tys
 
 dataGenericRep :: ModuleName
