@@ -10,8 +10,10 @@ New features:
 
 Bugfixes:
 
+* Solve `Prim.Row.Union left right all` constraint backwards (`all right -> left`) when `all` and `right` are literal rows (#3720, @MonoidMusician)
+
 * Unused identifier warnings now report smaller and more relevant source spans (#4088, @nwolverson)
-  
+
   Also fix incorrect warnings in cases involving a let-pattern binding shadowing
   an existing identifier.
 
