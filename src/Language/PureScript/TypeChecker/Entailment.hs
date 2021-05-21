@@ -23,7 +23,7 @@ import Control.Monad.Writer
 import Data.Foldable (for_, fold, toList)
 import Data.Function (on)
 import Data.Functor (($>))
-import Data.List (findIndices, minimumBy, groupBy, nubBy, sortBy, elem, delete)
+import Data.List (findIndices, minimumBy, groupBy, nubBy, sortBy, delete)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import qualified Data.Map as M
 import qualified Data.Set as S
