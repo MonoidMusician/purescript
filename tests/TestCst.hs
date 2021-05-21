@@ -5,16 +5,15 @@ module TestCst where
 
 import Prelude
 
-import Control.Monad (when)
-import qualified Data.ByteString.Lazy as BS
+import Control.Monad (when, forM_)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.Golden (goldenVsString, findByExtension)
-import Test.Tasty.QuickCheck
+import Test.Hspec
+import Test.QuickCheck
+import TestUtils
 import Text.Read (readMaybe)
 import Language.PureScript.CST.Errors as CST
 import Language.PureScript.CST.Lexer as CST
@@ -22,23 +21,20 @@ import Language.PureScript.CST.Print as CST
 import Language.PureScript.CST.Types
 import System.FilePath (takeBaseName, replaceExtension)
 
-main :: IO TestTree
-main = do
-  lytTests <- layoutTests
-  pure $ testGroup "cst"
-    [ lytTests
-    , litTests
-    ]
+spec :: Spec
+spec = do
+  layoutSpec
+  literalsSpec
 
-layoutTests :: IO TestTree
-layoutTests = do
-  pursFiles <- findByExtension [".purs"] "./tests/purs/layout"
-  return $ testGroup "Layout golden tests" $ do
-    file <- pursFiles
-    pure $ goldenVsString
-      (takeBaseName file)
-      (replaceExtension file ".out")
-      (BS.fromStrict . Text.encodeUtf8 <$> runLexer file)
+layoutSpec :: Spec
+layoutSpec = do
+  pursFiles <- runIO $ concat <$> getTestFiles "layout"
+  describe "Layout golden tests" $ do
+    forM_ pursFiles $ \file ->
+      it (takeBaseName file) $
+        goldenVsString
+          (replaceExtension file ".out")
+          (Text.encodeUtf8 <$> runLexer file)
   where
   runLexer file = do
     src <- Text.readFile file
@@ -48,34 +44,36 @@ layoutTests = do
       Right toks -> do
         pure $ CST.printTokens toks
 
-litTests :: TestTree
-litTests = testGroup "Literals"
-  [ testProperty "Integer" $
-      checkTok checkReadNum (\case TokInt _ a -> Just a; _ -> Nothing) . unInt
-  , testProperty "Hex" $
-      checkTok checkReadNum (\case TokInt _ a -> Just a; _ -> Nothing) . unHex
-  , testProperty "Number" $
-      checkTok checkReadNum (\case TokNumber _ a -> Just a; _ -> Nothing) . unFloat
-  , testProperty "Exponent" $
-      checkTok checkReadNum (\case TokNumber _ a -> Just a; _ -> Nothing) . unExponent
+literalsSpec :: Spec
+literalsSpec = describe "Literals" $ do
+  testProperty "Integer" $
+    checkTok checkReadNum (\case TokInt _ a -> Just a; _ -> Nothing) . unInt
+  testProperty "Hex" $
+    checkTok checkReadNum (\case TokInt _ a -> Just a; _ -> Nothing) . unHex
+  testProperty "Number" $
+    checkTok checkReadNum (\case TokNumber _ a -> Just a; _ -> Nothing) . unFloat
+  testProperty "Exponent" $
+    checkTok checkReadNum (\case TokNumber _ a -> Just a; _ -> Nothing) . unExponent
 
-  , testProperty "Integer (round trip)" $ roundTripTok . unInt
-  , testProperty "Hex (round trip)" $ roundTripTok . unHex
-  , testProperty "Number (round trip)" $ roundTripTok . unFloat
-  , testProperty "Exponent (round trip)" $ roundTripTok . unExponent
-  , testProperty "Char (round trip)" $ roundTripTok . unChar
-  , testProperty "String (round trip)" $ roundTripTok . unString
-  , testProperty "Raw String (round trip)" $ roundTripTok . unRawString
-  ]
+  testProperty "Integer (round trip)" $ roundTripTok . unInt
+  testProperty "Hex (round trip)" $ roundTripTok . unHex
+  testProperty "Number (round trip)" $ roundTripTok . unFloat
+  testProperty "Exponent (round trip)" $ roundTripTok . unExponent
+  testProperty "Char (round trip)" $ roundTripTok . unChar
+  testProperty "String (round trip)" $ roundTripTok . unString
+  testProperty "Raw String (round trip)" $ roundTripTok . unRawString
+
+  where
+  testProperty name test = specify name (property test)
 
 readTok' :: String -> Text -> Gen SourceToken
 readTok' failMsg t = case CST.lex t of
   Right tok : _ ->
     pure tok
   Left (_, err) : _ ->
-    fail $ failMsg <> ": " <> CST.prettyPrintError err
+    error $ failMsg <> ": " <> CST.prettyPrintError err
   [] ->
-    fail "Empty token stream"
+    error "Empty token stream"
 
 readTok :: Text -> Gen SourceToken
 readTok = readTok' "Failed to parse"
@@ -89,7 +87,7 @@ checkTok p f t = do
   SourceToken _ tok <- readTok t
   case f tok of
     Just a  -> p t a
-    Nothing -> fail $ "Failed to lex correctly: " <> show tok
+    Nothing -> error $ "Failed to lex correctly: " <> show tok
 
 roundTripTok :: Text -> Gen Bool
 roundTripTok t = do
@@ -106,7 +104,7 @@ checkReadNum t a = do
       chs' -> chs'
   case (== a) <$> readMaybe chs of
     Just a' -> pure a'
-    Nothing -> fail "Failed to `read`"
+    Nothing -> error "Failed to `read`"
 
 newtype PSSourceInt = PSSourceInt { unInt :: Text }
   deriving (Show, Eq)

@@ -103,7 +103,9 @@ data SimpleErrorMessage
   | KindsDoNotUnify SourceType SourceType
   | ConstrainedTypeUnified SourceType SourceType
   | OverlappingInstances (Qualified (ProperName 'ClassName)) [SourceType] [Qualified Ident]
-  | NoInstanceFound SourceConstraint
+  | NoInstanceFound
+      SourceConstraint -- ^ constraint that could not be solved
+      Bool -- ^ whether eliminating unknowns with annotations might help
   | AmbiguousTypeVariables SourceType [Int]
   | UnknownClass (Qualified (ProperName 'ClassName))
   | PossiblyInfiniteInstance (Qualified (ProperName 'ClassName)) [SourceType]
@@ -136,6 +138,8 @@ data SimpleErrorMessage
   | ShadowedName Ident
   | ShadowedTypeVar Text
   | UnusedTypeVar Text
+  | UnusedName Ident
+  | UnusedDeclaration Ident
   | WildcardInferredType SourceType Context
   | HoleInferredType Text SourceType Context (Maybe TypeSearch)
   | MissingTypeDeclaration Ident SourceType
@@ -303,6 +307,8 @@ errorCode em = case unwrapErrorMessage em of
   TransitiveDctorExportError{} -> "TransitiveDctorExportError"
   HiddenConstructors{} -> "HiddenConstructors"
   ShadowedName{} -> "ShadowedName"
+  UnusedName{} -> "UnusedName"
+  UnusedDeclaration{} -> "UnusedDeclaration"
   ShadowedTypeVar{} -> "ShadowedTypeVar"
   UnusedTypeVar{} -> "UnusedTypeVar"
   WildcardInferredType{} -> "WildcardInferredType"
@@ -448,7 +454,7 @@ onTypesInErrorMessageM f (ErrorMessage hints simple) = ErrorMessage <$> traverse
   gSimple (ConstrainedTypeUnified t1 t2) = ConstrainedTypeUnified <$> f t1 <*> f t2
   gSimple (ExprDoesNotHaveType e t) = ExprDoesNotHaveType e <$> f t
   gSimple (InvalidInstanceHead t) = InvalidInstanceHead <$> f t
-  gSimple (NoInstanceFound con) = NoInstanceFound <$> overConstraintArgs (traverse f) con
+  gSimple (NoInstanceFound con unks) = NoInstanceFound <$> overConstraintArgs (traverse f) con <*> pure unks
   gSimple (AmbiguousTypeVariables t us) = AmbiguousTypeVariables <$> f t <*> pure us
   gSimple (OverlappingInstances cl ts insts) = OverlappingInstances cl <$> traverse f ts <*> pure insts
   gSimple (PossiblyInfiniteInstance cl ts) = PossiblyInfiniteInstance cl <$> traverse f ts
@@ -846,7 +852,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line "Overlapping type class instances found for"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName nm)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , line "The following instances were found:"
             , indent $ paras (map (line . showQualified showIdent) ds)
@@ -856,14 +862,14 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
             , markCodeBox $ indent $ line (showQualified runProperName nm)
             , line "because the class was not in scope. Perhaps it was not exported."
             ]
-    renderSimpleErrorMessage (NoInstanceFound (Constraint _ C.Fail _ [ ty ] _)) | Just box <- toTypelevelString ty =
+    renderSimpleErrorMessage (NoInstanceFound (Constraint _ C.Fail _ [ ty ] _) _) | Just box <- toTypelevelString ty =
       paras [ line "A custom type error occurred while solving type class constraints:"
             , indent box
             ]
     renderSimpleErrorMessage (NoInstanceFound (Constraint _ C.Partial
                                                           _
                                                           _
-                                                          (Just (PartialConstraintData bs b)))) =
+                                                          (Just (PartialConstraintData bs b))) _) =
       paras [ line "A case expression could not be determined to cover all inputs."
             , line "The following additional cases are required to cover all inputs:"
             , indent $ paras $
@@ -872,28 +878,22 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
                   : [line "..." | not b]
             , line "Alternatively, add a Partial constraint to the type of the enclosing value."
             ]
-    renderSimpleErrorMessage (NoInstanceFound (Constraint _ C.Discard _ [ty] _)) =
+    renderSimpleErrorMessage (NoInstanceFound (Constraint _ C.Discard _ [ty] _) _) =
       paras [ line "A result of type"
             , markCodeBox $ indent $ prettyType ty
             , line "was implicitly discarded in a do notation block."
             , line ("You can use " <> markCode "_ <- ..." <> " to explicitly discard the result.")
             ]
-    renderSimpleErrorMessage (NoInstanceFound (Constraint _ nm _ ts _)) =
+    renderSimpleErrorMessage (NoInstanceFound (Constraint _ nm _ ts _) unks) =
       paras [ line "No type class instance was found for"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName nm)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , paras [ line "The instance head contains unknown type variables. Consider adding a type annotation."
-                    | any containsUnknowns ts
+                    | unks
                     ]
             ]
-      where
-      containsUnknowns :: Type a -> Bool
-      containsUnknowns = everythingOnTypes (||) go
-        where
-        go TUnknown{} = True
-        go _ = False
     renderSimpleErrorMessage (AmbiguousTypeVariables t us) =
       paras [ line "The inferred type"
             , markCodeBox $ indent $ prettyType t
@@ -909,7 +909,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line "Type class instance for"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName nm)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , line "is possibly infinite."
             ]
@@ -919,7 +919,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line "Cannot derive a type class instance for"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName nm)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , line "since instances of this type class are not derivable."
             ]
@@ -927,7 +927,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line "Cannot derive newtype instance for"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName nm)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , line "Make sure this is a newtype."
             ]
@@ -935,7 +935,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line "The derived newtype instance for"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName cl)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , line $ "does not include a derived superclass instance for " <> markCode (showQualified runProperName su) <> "."
             ]
@@ -943,7 +943,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line "The derived newtype instance for"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName cl)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , line $ "implies an superclass instance for " <> markCode (showQualified runProperName su) <> " which could not be verified."
             ]
@@ -951,7 +951,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line "Cannot derive the type class instance"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName nm)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , line $ fold $
                 [ "because the "
@@ -967,7 +967,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line "Cannot derive the type class instance"
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName nm)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , "because the type"
             , markCodeBox $ indent $ prettyType ty
@@ -1022,7 +1022,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       paras [ line $ "Orphan instance " <> markCode (showIdent nm) <> " found for "
             , markCodeBox $ indent $ Box.hsep 1 Box.left
                 [ line (showQualified runProperName cnm)
-                , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) ts)
+                , Box.vcat Box.left (map prettyTypeAtom ts)
                 ]
             , Box.vcat Box.left $ case modulesToList of
                 [] -> [ line "There is nowhere this instance can be placed without being an orphan."
@@ -1061,6 +1061,10 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       line $ "Name " <> markCode (showIdent nm) <> " was shadowed."
     renderSimpleErrorMessage (ShadowedTypeVar tv) =
       line $ "Type variable " <> markCode tv <> " was shadowed."
+    renderSimpleErrorMessage (UnusedName nm) =
+      line $ "Name " <> markCode (showIdent nm) <> " was introduced but not used."
+    renderSimpleErrorMessage (UnusedDeclaration nm) =
+      line $ "Declaration " <> markCode (showIdent nm) <> " was not used, and is not exported."
     renderSimpleErrorMessage (UnusedTypeVar tv) =
       line $ "Type variable " <> markCode tv <> " is ambiguous, since it is unused in the polymorphic type which introduces it."
     renderSimpleErrorMessage (MisleadingEmptyTypeImport mn name) =
@@ -1324,7 +1328,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
         [ line "Invalid type class instance declaration for"
         , markCodeBox $ indent $ Box.hsep 1 Box.left
             [ line (showQualified runProperName C.Coercible)
-            , Box.vcat Box.left (map (typeAtomAsBox prettyDepth) tys)
+            , Box.vcat Box.left (map prettyTypeAtom tys)
             ]
         , line "Instance declarations of this type class are disallowed."
         ]
@@ -1590,6 +1594,11 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
     | full = typeAsBox depth
     | otherwise = typeAsBox depth . eraseForAllKindAnnotations . eraseKindApps
 
+  prettyTypeAtom :: Type a -> Box.Box
+  prettyTypeAtom
+    | full = typeAtomAsBox prettyDepth
+    | otherwise = typeAtomAsBox prettyDepth . eraseForAllKindAnnotations . eraseKindApps
+
   levelText :: Text
   levelText = case level of
     Error -> "error"
@@ -1624,7 +1633,7 @@ prettyPrintSingleError (PPEOptions codeColor full level showDocs relPath) e = fl
       where
       isUnifyHint ErrorUnifyingTypes{} = True
       isUnifyHint _ = False
-    stripRedundantHints (NoInstanceFound (Constraint _ C.Coercible _ args _)) = filter (not . isSolverHint)
+    stripRedundantHints (NoInstanceFound (Constraint _ C.Coercible _ args _) _) = filter (not . isSolverHint)
       where
       isSolverHint (ErrorSolvingConstraint (Constraint _ C.Coercible _ args' _)) = args == args'
       isSolverHint _ = False
@@ -1667,7 +1676,7 @@ prettyPrintImport mn idt qual =
   let i = case idt of
             Implicit -> runModuleName mn
             Explicit refs -> runModuleName mn <> " (" <> T.intercalate ", " (mapMaybe prettyPrintRef refs) <> ")"
-            Hiding refs -> runModuleName mn <> " hiding (" <> T.intercalate "," (mapMaybe prettyPrintRef refs) <> ")"
+            Hiding refs -> runModuleName mn <> " hiding (" <> T.intercalate ", " (mapMaybe prettyPrintRef refs) <> ")"
   in i <> maybe "" (\q -> " as " <> runModuleName q) qual
 
 prettyPrintRef :: DeclarationRef -> Maybe Text
@@ -1842,6 +1851,12 @@ warnAndRethrowWithPosition pos = rethrowWithPosition pos . warnWithPosition pos
 withPosition :: SourceSpan -> ErrorMessage -> ErrorMessage
 withPosition NullSourceSpan err = err
 withPosition pos (ErrorMessage hints se) = ErrorMessage (positionedError pos : hints) se
+
+withoutPosition :: ErrorMessage -> ErrorMessage
+withoutPosition (ErrorMessage hints se) = ErrorMessage (filter go hints) se
+  where
+  go (PositionedError _) = False
+  go _ = True
 
 positionedError :: SourceSpan -> ErrorMessageHint
 positionedError = PositionedError . pure
