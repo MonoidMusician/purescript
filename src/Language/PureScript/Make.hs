@@ -56,6 +56,7 @@ import Language.PureScript.Sugar (Env, collapseBindingGroups, createBindingGroup
 import Language.PureScript.TypeChecker (CheckState (..), emptyCheckState, typeCheckModule)
 import System.Directory (doesFileExist)
 import System.FilePath (replaceExtension)
+import Language.PureScript.Make.Cache qualified as Cache
 
 -- | Rebuild a single module.
 --
@@ -224,11 +225,7 @@ make' MakeOptions{..} ma@MakeActions{..} ms = do
   -- Tell prebuilt warnings.
   tell warnings
 
-  -- Write the updated build cache database to disk. There is not need to remove
-  -- failed modules and their deps from cache-db as on the next run we may have
-  -- fixed failed modules (without any changes from previously compiled or ` with
-  -- externs diffs that will not require rebuild of deps).
-  writeCacheDb newCacheDb
+  writeCacheDb $ Cache.removeModules (M.keysSet failures) newCacheDb
 
   writePackageJson
 

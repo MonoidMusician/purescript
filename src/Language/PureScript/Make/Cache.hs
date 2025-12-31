@@ -4,6 +4,7 @@ module Language.PureScript.Make.Cache
   , CacheDb
   , CacheInfo(..)
   , checkChanged
+  , removeModules
   , normaliseForCache
   , cacheDbIsCurrentVersion
   , toCacheDbVersioned
@@ -37,6 +38,7 @@ import Language.PureScript.Names (ModuleName)
 import Data.Version (showVersion)
 import Data.Aeson ((.=))
 import Data.Aeson.Types ((.:))
+import Data.Set (Set)
 
 digestToHex :: Digest a -> Text
 digestToHex = decodeUtf8 . convertToBase Base16
@@ -193,3 +195,8 @@ normaliseForCache basePath fp =
         -- relative to the base that means it is not underneath
         -- the base path
         FilePath.normalise fp
+
+-- | Remove any modules from the given set from the cache database; used when
+-- they failed to build.
+removeModules :: Set ModuleName -> CacheDb -> CacheDb
+removeModules = flip Map.withoutKeys
