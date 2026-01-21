@@ -50,7 +50,7 @@ import Language.PureScript.CST qualified as CST
 import Language.PureScript.Docs.Prim qualified as Docs.Prim
 import Language.PureScript.Docs.Types qualified as Docs
 import Language.PureScript.Errors (MultipleErrors, SimpleErrorMessage(..), errorMessage, errorMessage', nonEmpty, ErrorMessage (..), onErrorMessages, replaceSpanName, runMultipleErrors)
-import Language.PureScript.Externs (ExternsFile, externsFileName)
+import Language.PureScript.Externs (ExternsFile (efModuleName), externsFileName)
 import Language.PureScript.Make.Monad (Make, copyFile, getCurrentTime, getTimestamp, getTimestampMaybe, hashFile, makeIO, readExternsFile, readWarningsFile, readJSONFile, readTextFile, setTimestamp, writeCborFile, writeJSONFile, writeTextFile, removeFileIfExists)
 import Language.PureScript.Make.Cache (CacheDb, ContentHash, cacheDbIsCurrentVersion, fromCacheDbVersioned, normaliseForCache, toCacheDbVersioned)
 import Language.PureScript.Make.ExternsDiff qualified as ED
@@ -196,6 +196,8 @@ data MakeActions m = MakeActions
   , updateOutputTimestamp :: ModuleName -> Maybe UTCTime -> m Bool
   -- ^ Updates the modification time of existing output files to mark them as
   -- actual.
+  , replaceExterns :: ExternsFile -> m ()
+  -- ^ Replace an already written externs file.
   , readExterns :: ModuleName -> m (FilePath, Maybe ExternsFile)
   -- ^ Read the externs file for a module as a string and also return the actual
   -- path for the file.
@@ -321,6 +323,7 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
     getInputTimestampsAndHashes
     getOutputTimestamp
     updateOutputTimestamp
+    replaceExterns
     readExterns
     readWarnings
     codegen
@@ -415,6 +418,9 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
     when (S.member Docs codegenTargets) $ for_ Docs.Prim.primModules $ \docsMod@Docs.Module{..} ->
       writeJSONFile (outputFilename modName "docs.json") docsMod
 
+  replaceExterns :: ExternsFile -> Make ()
+  replaceExterns exts = writeCborFile (outputFilename (efModuleName exts) externsFileName) exts
+
   codegen :: CF.Module CF.Ann -> Docs.Module -> ExternsFile -> MultipleErrors -> SupplyT Make ()
   codegen m docs exts warnings = do
     let mn = CF.moduleName m
@@ -424,7 +430,7 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
       -- Remove spanName from the errors
       writeCborFile warningsFile (replaceSpanNameInErrors "" warnings)
     else
-       removeFileIfExists warningsFile
+      removeFileIfExists warningsFile
     codegenTargets <- lift $ asks optionsCodegenTargets
     when (S.member CoreFn codegenTargets) $ do
       let coreFnFile = targetFilename mn CoreFn

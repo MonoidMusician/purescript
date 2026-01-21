@@ -1,5 +1,6 @@
 module Language.PureScript.Make.BuildPlan
-  ( BuildPlan(bpEnv, bpIndex)
+  ( BuildAction(..)
+  , BuildPlan(bpEnv, bpIndex)
   , BuildJobResult(..)
   , Options(..)
   , getBuildReason
@@ -26,19 +27,21 @@ import Data.Maybe (catMaybes, fromMaybe, isNothing)
 import Data.Set qualified as S
 import Data.Text qualified as T
 import Data.Time.Clock (UTCTime)
-import Language.PureScript.AST (Module, getModuleName, getModuleSourceSpan, spanName)
+import Language.PureScript.AST (Module, getModuleName, getModuleSourceSpan, SourceSpan, spanName)
 import Language.PureScript.CST qualified as CST
 import Language.PureScript.Crash (internalError)
 import Language.PureScript.Errors (MultipleErrors (..))
-import Language.PureScript.Externs (ExternsFile)
+import Language.PureScript.Externs (ExternsFile (efSourceSpan))
 import Language.PureScript.Make.Actions (MakeActions (..), RebuildPolicy (..), RebuildReason (..))
 import Language.PureScript.Make.Cache (CacheDb, CacheInfo, checkChanged)
-import Language.PureScript.Make.ExternsDiff (ExternsDiff, checkDiffs, emptyDiff)
+import Language.PureScript.Make.ExternsDiff (ExternsDiff, checkDiffs, emptyDiff, DiffAction (NoChange, DiffRef, Patch))
 import Language.PureScript.ModuleDependencies (ModuleGraph', DependencyDepth (..))
 import Language.PureScript.Names (ModuleName)
 import Language.PureScript.Sugar.Names.Env (Env, primEnv)
 import System.Directory (getCurrentDirectory)
 import Control.Applicative ((<|>))
+import Control.Lens.Extras (template)
+import Control.Lens (over)
 
 data Prebuilt = Prebuilt
   { pbExterns :: ExternsFile
@@ -164,22 +167,36 @@ getPrevResult :: BuildPlan -> ModuleName -> Maybe (ExternsFile, MultipleErrors)
 getPrevResult buildPlan moduleName =
   (,) <$> pbExterns <*> pbWarnings <$> snd <$> M.lookup moduleName (bpPrevious buildPlan)
 
+data BuildAction
+  = SkipBuild ExternsFile MultipleErrors
+  | PatchExterns ExternsFile MultipleErrors (Maybe (String, String) {- file name changed -})
+  | RebuildBecause RebuildReason
+
 -- Get the build reason.
-getBuildReason :: BuildPlan -> Module -> Maybe [ExternsDiff] -> Either (ExternsFile, MultipleErrors) RebuildReason
-getBuildReason (BuildPlan {..}) m depsDiffs
-  -- This should be refactored.
-  | Nothing <- depsDiffs = Right NoCachedDependency
-  | Just (Just reason, _)  <- prevResult = Right reason
-  | Just (Nothing, exts) <- prevResult =
-      case checkDiffs m <$> depsDiffs of
-        Just (Just diffRef) -> Right (UpstreamRef diffRef)
-        (Just Nothing) -> Left (pbExterns exts, pbWarnings exts)
-        Nothing -> Right NoCachedDependency
-  | otherwise = Right $ fromMaybe (barrierError "getBuildReason") (M.lookup mn bpNoPrevious)
+getBuildReason :: BuildPlan -> Module -> Maybe [ExternsDiff] -> BuildAction
+getBuildReason _ _ Nothing = RebuildBecause NoCachedDependency
+getBuildReason (BuildPlan {..}) m (Just depsDiffs) =
+  case M.lookup mn bpPrevious of
+    Just (Just reason, _) -> RebuildBecause reason
+    Just (Nothing, exts) ->
+      let
+        externs = pbExterns exts
+        mnDiff = if fileNameFromExterns externs == fileNameFromModule m
+          then Nothing
+          else Just (fileNameFromExterns externs, fileNameFromModule m)
+      in case checkDiffs m depsDiffs of
+        DiffRef diffRef -> RebuildBecause (UpstreamRef diffRef)
+        NoChange -> SkipBuild externs (pbWarnings exts)
+        Patch patch -> PatchExterns (patchExterns patch externs) (patchWarnings patch $ pbWarnings exts) mnDiff
+    Nothing -> RebuildBecause $ fromMaybe NoCached (M.lookup mn bpNoPrevious)
 
   where
-  prevResult = M.lookup mn bpPrevious
   mn = getModuleName m
+  fileNameFromExterns = spanName . efSourceSpan
+  fileNameFromModule = spanName . getModuleSourceSpan
+
+  patchExterns = over template :: (SourceSpan -> SourceSpan) -> ExternsFile -> ExternsFile
+  patchWarnings = over template :: (SourceSpan -> SourceSpan) -> MultipleErrors -> MultipleErrors
 
 data Options = Options
   { optPreloadAllExterns :: Bool

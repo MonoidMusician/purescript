@@ -27,10 +27,11 @@
 module Language.PureScript.Make.ExternsDiff
   ( ExternsDiff(..)
   , RefStatus(..)
+  , DiffAction(..)
   , DiffRef(..)
   , Ref(..)
-  , isEmpty
   , emptyDiff
+  , moduleMovedDiff
   , diffExterns
   , checkDiffs
   ) where
@@ -40,6 +41,7 @@ import Protolude hiding (check, moduleName, trace)
 import Data.Graph as G (graphFromEdges, reachable)
 import Data.Map qualified as M
 import Data.Set qualified as S
+import Data.String (String)
 
 import Language.PureScript.AST qualified as P
 import Language.PureScript.AST.Declarations.ChainId (ChainId (..))
@@ -50,6 +52,7 @@ import Language.PureScript.Externs qualified as P
 import Language.PureScript.Names (ModuleName)
 import Language.PureScript.Names qualified as P
 import Language.PureScript.Types qualified as P
+import Language.PureScript.AST.SourcePos (modifySpanName)
 
 -- Refs structure appropriate for storing and checking externs diffs.
 data Ref
@@ -78,12 +81,15 @@ type RefsWithStatus = M.Map Ref RefStatus
 type ModuleRefsMap = Map ModuleName (Set Ref)
 
 data ExternsDiff = ExternsDiff
-  { edModuleName :: ModuleName, edRefs :: Map Ref RefStatus }
+  { edModuleName :: ModuleName, edFileName :: Maybe (String, String), edRefs :: Map Ref RefStatus }
   deriving (Eq, Ord, Show)
 
 -- | Empty diff means no effective difference between externs.
 emptyDiff :: P.ModuleName -> ExternsDiff
-emptyDiff mn = ExternsDiff mn mempty
+emptyDiff mn = ExternsDiff mn Nothing mempty
+
+moduleMovedDiff :: P.ModuleName -> Maybe (String, String) -> ExternsDiff
+moduleMovedDiff mn fileNameDiff = ExternsDiff mn fileNameDiff mempty
 
 isRefRemoved :: RefStatus -> Bool
 isRefRemoved Removed = True
@@ -231,10 +237,13 @@ getAffectedLocal modName diffsMap unchangedRefs =
 -- Compares two externs file versions using list with diffs of dependencies.
 diffExterns :: [ExternsDiff] -> P.ExternsFile -> P.ExternsFile -> ExternsDiff
 diffExterns depsDiffs newExts oldExts  =
-  ExternsDiff modName $
+  ExternsDiff modName fileNameDiff $
     affectedReExported <> changedRefs <> affectedLocalRefs
   where
     modName = P.efModuleName newExts
+    fileNameFromExterns = P.spanName . P.efSourceSpan
+    fileNameDiff = if fileNameFromExterns oldExts == fileNameFromExterns newExts
+      then Nothing else Just (fileNameFromExterns oldExts, fileNameFromExterns newExts)
 
     depsDiffsMap = M.fromList (map (liftM2 (,) edModuleName (M.keysSet . edRefs)) depsDiffs)
 
@@ -257,20 +266,27 @@ diffExterns depsDiffs newExts oldExts  =
 -- This type defines a reason for module to be rebuilt. It contains the fhe
 -- first found reference to changed elements.
 data DiffRef
-    = ImportedRef (ModuleName, Ref)
-    | ReExportedRef (ModuleName, Ref)
-    | UsedRef (ModuleName, Ref)
-    deriving (Show, Eq, Ord)
+  = ImportedRef (ModuleName, Ref)
+  | ReExportedRef (ModuleName, Ref)
+  | UsedRef (ModuleName, Ref)
+  deriving (Show, Eq, Ord)
+
+data DiffAction
+  = NoChange
+  | Patch (P.SourceSpan -> P.SourceSpan)
+  | DiffRef DiffRef
 
 -- Checks if the module effectively uses any of diff's refs.
-checkDiffs :: P.Module -> [ExternsDiff] -> Maybe DiffRef
+checkDiffs :: P.Module -> [ExternsDiff] -> DiffAction
 checkDiffs (P.Module _ _ _ decls exports) diffs
-  | all isEmpty diffs = Nothing
+  | Just renames <- fold <$> traverse isTrivial diffs
+    = if M.null renames then NoChange else Patch $
+        modifySpanName $ \name -> fromMaybe name (M.lookup name renames)
   | otherwise = case makeSearches decls diffs of
-      Left r -> Just (ImportedRef r)
+      Left r -> DiffRef (ImportedRef r)
       Right searches
-        | null searches -> Nothing
-        | otherwise ->
+        | null searches -> NoChange
+        | otherwise -> maybe NoChange DiffRef $
             (ReExportedRef <$> checkReExports searches)
               <|> (UsedRef <$> checkUsage searches decls)
   where
@@ -398,10 +414,10 @@ toRefs = \case
   P.ValueOpRef _ n -> S.singleton (ValueOpRef n)
   _ -> S.empty
 
-isEmpty :: ExternsDiff -> Bool
-isEmpty (ExternsDiff _ refs)
-  | null refs = True
-  | otherwise = False
+isTrivial :: ExternsDiff -> Maybe (Map String String)
+isTrivial (ExternsDiff _ maybeRename refs)
+  | null refs = uncurry M.singleton <$> maybeRename
+  | otherwise = Nothing
 
 type Tuple4 m a = (m a, m a, m a, m a)
 

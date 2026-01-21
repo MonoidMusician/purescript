@@ -45,7 +45,7 @@ import Language.PureScript.Errors (MultipleErrors (..), SimpleErrorMessage (..),
 import Language.PureScript.Externs (ExternsFile, applyExternsFileToEnvironment, moduleToExternsFile)
 import Language.PureScript.Linter (Name (..), lint, lintImports)
 import Language.PureScript.Make.Actions as Actions
-import Language.PureScript.Make.BuildPlan (BuildJobResult (..), BuildPlan (..), getResult)
+import Language.PureScript.Make.BuildPlan (BuildAction (..), BuildJobResult (..), BuildPlan (..), getResult)
 import Language.PureScript.Make.BuildPlan qualified as BuildPlan
 import Language.PureScript.Make.ExternsDiff qualified as ED
 import Language.PureScript.Make.Monad as Monad
@@ -321,13 +321,18 @@ make' MakeOptions{..} ma@MakeActions{..} ms = do
             -- Get the reason for building or skipping the compilation.
             case BuildPlan.getBuildReason buildPlan m depsDiffs of
               -- No rebuild reason skipping the module.
-              Left (exts, warnings) -> do
+              SkipBuild exts warnings -> do
                 _ <- updateOutputTimestamp moduleName Nothing
                 progress $ SkippingModule moduleName moduleIndex
                 -- Prebuilt result warnings already contain parser warnings.
                 pure $ BuildJobSucceeded Nothing warnings exts (Just (ED.emptyDiff moduleName))
 
-              Right br -> do
+              PatchExterns patchedExterns patchedWarnings fileNameDiff -> do
+                replaceExterns patchedExterns
+                progress $ SkippingModule moduleName moduleIndex
+                pure $ BuildJobSucceeded Nothing patchedWarnings patchedExterns (Just (ED.moduleMovedDiff moduleName fileNameDiff))
+
+              RebuildBecause buildReason -> do
                 start <- liftBase getCurrentTime
                 -- We need to ensure that all dependencies have been included in Env.
                 C.modifyMVar_ (bpEnv buildPlan) $ \env -> do
@@ -349,7 +354,7 @@ make' MakeOptions{..} ma@MakeActions{..} ms = do
                   -- Force the externs and warnings to avoid retaining excess module
                   -- data after the module is finished compiling.
                   extsAndWarnings <- evaluate . force <=< listen $ do
-                    progress $ CompilingModule moduleName moduleIndex br
+                    progress $ CompilingModule moduleName moduleIndex buildReason
                     rebuildModule' ma env externs (pwarnings, m)
                   liftBase $ traceMarkerIO $ T.unpack (runModuleName moduleName) <> " end"
                   -- Add parser warnings.
@@ -365,7 +370,7 @@ make' MakeOptions{..} ma@MakeActions{..} ms = do
                 progress $ ModuleCompiled moduleName moduleIndex timeDiff diff warnings
 
                 -- Do not put warnings in job result because they are already told.
-                pure $ BuildJobSucceeded (Just br) mempty exts diff
+                pure $ BuildJobSucceeded (Just buildReason) mempty exts diff
 
     BuildPlan.markComplete buildPlan moduleName result
 
