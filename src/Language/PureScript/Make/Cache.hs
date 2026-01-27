@@ -3,6 +3,7 @@ module Language.PureScript.Make.Cache
   , hash
   , CacheDb
   , CacheInfo(..)
+  , UpToDate(..)
   , checkChanged
   , removeModules
   , normaliseForCache
@@ -24,7 +25,6 @@ import Data.ByteString qualified as BS
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
-import Data.Monoid (All(..))
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (encodeUtf8, decodeUtf8)
 import Data.These (These(..))
@@ -106,8 +106,20 @@ newtype CacheInfo = CacheInfo
   deriving stock (Show)
   deriving newtype (Eq, Ord, Semigroup, Monoid, Aeson.FromJSON, Aeson.ToJSON)
 
+data UpToDate = ContentsChanged | FilePathChanged | UpToDate
+  deriving (Show, Eq)
+
+instance Monoid UpToDate where
+  mempty = UpToDate
+instance Semigroup UpToDate where
+  ContentsChanged <> _ = ContentsChanged
+  _ <> ContentsChanged = ContentsChanged
+  UpToDate <> r = r
+  l <> UpToDate = l
+  FilePathChanged <> FilePathChanged = FilePathChanged
+
 -- Maps old paths to current by extension.
--- "Old/Module.purs" => "New/Module.urs"
+-- "Old/Module.purs" => "New/Module.purs"
 mapFilePaths :: Map FilePath b -> Map FilePath a -> Map FilePath a
 mapFilePaths cur =
   Map.mapKeys $
@@ -144,29 +156,31 @@ checkChanged
   -> ModuleName
   -> FilePath
   -> Map FilePath (UTCTime, m ContentHash)
-  -> m (CacheInfo, Bool)
+  -> m (CacheInfo, UpToDate)
 checkChanged cacheDb mn basePath currentInfo = do
 
   -- Replace paths in cachedDb entry with paths from new info to handle module
   -- file rename/move without recompilation.
-  let dbInfo = mapFilePaths currentInfo
-        $ unCacheInfo $ fromMaybe mempty (Map.lookup mn cacheDb)
+  let
+    previousInfo = unCacheInfo $ fromMaybe mempty (Map.lookup mn cacheDb)
+    dbInfo = mapFilePaths currentInfo previousInfo
 
   (newInfo, isUpToDate) <-
     fmap mconcat $
       for (Map.toList (align dbInfo currentInfo)) $ \(normaliseForCache basePath -> fp, aligned) -> do
+        let wasNotRenamed = Map.member fp previousInfo
         case aligned of
           This _ -> do
             -- One of the input files listed in the cache no longer exists;
             -- remove that file from the cache and note that the module needs
             -- rebuilding
-            pure (Map.empty, All False)
+            pure (Map.empty, ContentsChanged)
           That (timestamp, getHash) -> do
             -- The module has a new input file; add it to the cache and
             -- note that the module needs rebuilding.
             newHash <- getHash
-            pure (Map.singleton fp (timestamp, newHash), All False)
-          These db@(dbTimestamp, _) (newTimestamp, _) | dbTimestamp == newTimestamp -> do
+            pure (Map.singleton fp (timestamp, newHash), ContentsChanged)
+          These db@(dbTimestamp, _) (newTimestamp, _) | dbTimestamp == newTimestamp, wasNotRenamed -> do
             -- This file exists both currently and in the cache database,
             -- and the timestamp is unchanged, so we skip checking the
             -- hash.
@@ -175,9 +189,13 @@ checkChanged cacheDb mn basePath currentInfo = do
             -- This file exists both currently and in the cache database,
             -- but the timestamp has changed, so we need to check the hash.
             newHash <- getHash
-            pure (Map.singleton fp (newTimestamp, newHash), All (dbHash == newHash))
+            let
+              upToDate | dbHash /= newHash = ContentsChanged
+                       | wasNotRenamed = UpToDate
+                       | otherwise = FilePathChanged
+            pure (Map.singleton fp (newTimestamp, newHash), upToDate)
 
-  pure (CacheInfo newInfo, getAll isUpToDate)
+  pure (CacheInfo newInfo, isUpToDate)
 
 -- | 1. Any path that is beneath our current working directory will be
 -- stored as a normalised relative path

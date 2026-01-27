@@ -36,7 +36,7 @@ module Language.PureScript.Make.ExternsDiff
   , checkDiffs
   ) where
 
-import Protolude hiding (check, moduleName, trace)
+import Protolude hiding (check, moduleName)
 
 import Data.Graph as G (graphFromEdges, reachable)
 import Data.Map qualified as M
@@ -277,19 +277,22 @@ data DiffAction
   | DiffRef DiffRef
 
 -- Checks if the module effectively uses any of diff's refs.
-checkDiffs :: P.Module -> [ExternsDiff] -> DiffAction
-checkDiffs (P.Module _ _ _ decls exports) diffs
-  | Just renames <- fold <$> traverse isTrivial diffs
+checkDiffs :: P.Module -> Maybe (String, String) -> [ExternsDiff] -> DiffAction
+checkDiffs (P.Module _ _ _ decls exports) moduleNameDiff diffs
+  | Just renames <- M.fromList . catMaybes  . (moduleNameDiff :) <$> traverse isTrivial diffs
     = if M.null renames then NoChange else Patch $
         modifySpanName $ \name -> fromMaybe name (M.lookup name renames)
   | otherwise = case makeSearches decls diffs of
       Left r -> DiffRef (ImportedRef r)
       Right searches
-        | null searches -> NoChange
-        | otherwise -> maybe NoChange DiffRef $
+        | null searches -> noRealChange
+        | otherwise -> maybe noRealChange DiffRef $
             (ReExportedRef <$> checkReExports searches)
               <|> (UsedRef <$> checkUsage searches decls)
   where
+    noRealChange = case moduleNameDiff of
+      Nothing -> NoChange
+      Just (prev, next) -> Patch $ modifySpanName $ \name -> if name == prev then next else name
     -- Check if the module reexports any of searched refs.
     checkReExports searches =
       map (\(mn, _, ref) -> (mn, ref)) $
@@ -414,9 +417,9 @@ toRefs = \case
   P.ValueOpRef _ n -> S.singleton (ValueOpRef n)
   _ -> S.empty
 
-isTrivial :: ExternsDiff -> Maybe (Map String String)
+isTrivial :: ExternsDiff -> Maybe (Maybe (String, String))
 isTrivial (ExternsDiff _ maybeRename refs)
-  | null refs = uncurry M.singleton <$> maybeRename
+  | null refs = Just maybeRename
   | otherwise = Nothing
 
 type Tuple4 m a = (m a, m a, m a, m a)

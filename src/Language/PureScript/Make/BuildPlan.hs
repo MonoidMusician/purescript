@@ -33,7 +33,7 @@ import Language.PureScript.Crash (internalError)
 import Language.PureScript.Errors (MultipleErrors (..))
 import Language.PureScript.Externs (ExternsFile (efSourceSpan))
 import Language.PureScript.Make.Actions (MakeActions (..), RebuildPolicy (..), RebuildReason (..))
-import Language.PureScript.Make.Cache (CacheDb, CacheInfo, checkChanged)
+import Language.PureScript.Make.Cache (CacheDb, CacheInfo, UpToDate(..), checkChanged)
 import Language.PureScript.Make.ExternsDiff (ExternsDiff, checkDiffs, emptyDiff, DiffAction (NoChange, DiffRef, Patch))
 import Language.PureScript.ModuleDependencies (ModuleGraph', DependencyDepth (..))
 import Language.PureScript.Names (ModuleName)
@@ -46,7 +46,7 @@ import Control.Lens (over)
 data Prebuilt = Prebuilt
   { pbExterns :: ExternsFile
   , pbWarnings :: MultipleErrors
-  }
+  } deriving (Show)
 
 -- | The BuildPlan tracks information about our build progress, and holds all
 -- prebuilt modules for incremental builds.
@@ -93,7 +93,7 @@ newtype OutputTimestamp = OutputTimestamp UTCTime deriving (Eq, Ord, Show)
 -- plan; used to decide whether a module needs rebuilding.
 data RebuildStatus = RebuildStatus
   { rsModuleName :: ModuleName
-  , rsRebuildNever :: Bool
+  , rsRebuildPolicy :: Maybe RebuildPolicy
   , rsNewCacheInfo :: Maybe CacheInfo
     -- ^ New cache info for this module which should be stored for subsequent
     -- incremental builds. A value of Nothing indicates that cache info for
@@ -101,7 +101,7 @@ data RebuildStatus = RebuildStatus
     -- rebuilt according to a RebuildPolicy instead.
   , rsPrevious :: Maybe OutputTimestamp
     -- ^ Prebuilt timestamp (compilation time) for this module.
-  , rsUpToDate :: Bool
+  , rsUpToDate :: UpToDate
     -- ^ Whether or not module (timestamp or content) changed since previous
     -- compilation (checked against provided cache-db info).
   } deriving Show
@@ -184,7 +184,7 @@ getBuildReason (BuildPlan {..}) m (Just depsDiffs) =
         mnDiff = if fileNameFromExterns externs == fileNameFromModule m
           then Nothing
           else Just (fileNameFromExterns externs, fileNameFromModule m)
-      in case checkDiffs m depsDiffs of
+      in case checkDiffs m mnDiff depsDiffs of
         DiffRef diffRef -> RebuildBecause (UpstreamRef diffRef)
         NoChange -> SkipBuild externs (pbWarnings exts)
         Patch patch -> PatchExterns (patchExterns patch externs) (patchWarnings patch $ pbWarnings exts) mnDiff
@@ -273,7 +273,14 @@ construct Options{..} MakeActions{..} cacheDb (sorted, graph) = do
   env <- C.newMVar primEnv
   idx <- C.newMVar 1
   pure
-    ( BuildPlan prebuilt previous noPrebuilt buildJobs env idx
+    ( BuildPlan
+      { bpPrebuilt = prebuilt
+      , bpPrevious = previous
+      , bpNoPrevious = noPrebuilt
+      , bpBuildJobs = buildJobs
+      , bpEnv = env
+      , bpIndex = idx
+      }
     , let
         update = flip $ \s ->
           M.alter (const (rsNewCacheInfo s)) (rsModuleName s)
@@ -315,19 +322,19 @@ construct Options{..} MakeActions{..} cacheDb (sorted, graph) = do
           timestamp <- fmap OutputTimestamp <$> getOutputTimestamp moduleName
           pure (RebuildStatus
             { rsModuleName = moduleName
-            , rsRebuildNever = True
+            , rsRebuildPolicy = Just RebuildNever
             -- rsRebuildReason: Nothing -- if not prebuilt?
             , rsPrevious = timestamp
             , rsNewCacheInfo = Nothing
-            , rsUpToDate = True
+            , rsUpToDate = UpToDate
             })
         Left RebuildAlways -> do
           pure (RebuildStatus
             { rsModuleName = moduleName
-            , rsRebuildNever = False
+            , rsRebuildPolicy = Just RebuildAlways
             , rsPrevious = Nothing
             , rsNewCacheInfo = Nothing
-            , rsUpToDate = False
+            , rsUpToDate = ContentsChanged
             })
         Right cacheInfo -> do
           cwd <- liftBase getCurrentDirectory
@@ -336,7 +343,7 @@ construct Options{..} MakeActions{..} cacheDb (sorted, graph) = do
 
           pure (RebuildStatus
             { rsModuleName = moduleName
-            , rsRebuildNever = False
+            , rsRebuildPolicy = Nothing
             , rsPrevious = timestamp
             , rsNewCacheInfo = Just newCacheInfo
             , rsUpToDate = upToDate
@@ -353,18 +360,20 @@ construct Options{..} MakeActions{..} cacheDb (sorted, graph) = do
     splitModules :: [RebuildStatus] -> (RebuildMap, PrebuiltMap)
     splitModules = foldl' collectByStatus (M.empty, M.empty)
 
-    collectByStatus (build, prebuilt) (RebuildStatus mn rebuildNever cacheInfo mbPb upToDate)
-      -- If no cacheInfo => RebuildAlwaysPolicy.
-      | Nothing <- mbPb, Nothing <- cacheInfo, not upToDate =
-          (M.insert mn (Just RebuildAlwaysPolicy, Nothing) build, prebuilt)
-      -- In other cases if no previous, even if RebuildNever policy.
-      | Nothing <- mbPb =
-          (M.insert mn (Just NoCached, Nothing) build, prebuilt)
-      | Just pb <- mbPb, not upToDate = toRebuild (Just CacheOutdated, pb)
+    -- If it is not prebuilt, we must always rebuild it
+    collectByStatus (build, prebuilt) (RebuildStatus mn rebuildPolicy _cacheInfo Nothing _upToDate) =
+      let
+        -- We can record the reason as "RebuildAlways" if applicable
+        why = if rebuildPolicy == Just RebuildAlways
+          then RebuildAlwaysPolicy
+          else NoCached
+      in (M.insert mn (Just why, Nothing) build, prebuilt)
+    collectByStatus (build, prebuilt) (RebuildStatus mn rebuildPolicy _cacheInfo (Just pb) upToDate)
+      | upToDate == ContentsChanged = toRebuild (Just CacheOutdated)
       -- Treat as prebuilt because of RebuildNever policy.
-      | Just pb <- mbPb, rebuildNever = toPrebuilt pb
-      -- In other case analyze compilation times of dependencies.
-      | Just pb <- mbPb = do
+      | rebuildPolicy == Just RebuildNever = isPrebuilt
+      -- Otherwise analyze the compilation times of dependencies.
+      | otherwise = do
           -- We may check only direct dependencies here because transitive
           -- changes (caused by reexports) will be propagated by externs diffs
           -- of direct dependencies.
@@ -374,21 +383,25 @@ construct Options{..} MakeActions{..} cacheDb (sorted, graph) = do
           let modTimes' = map (\dmn -> (,) dmn <$> M.lookup dmn prebuilt) deps
 
           case maximumMaybe (catMaybes modTimes) of
-                -- Check if any of deps where build later. This means we should
+                -- Check if any deps were built later. This means we should
                 -- recompile even if the module's source is up-to-date. This may
                 -- happen due to some partial builds or ide compilation
                 -- workflows involved that do not assume full project
                 -- compilation.
-                Just (dmn, depModTime) | pb < depModTime -> toRebuild (Just (LaterDependency dmn), pb)
+                Just (dmn, depModTime) | pb < depModTime -> toRebuild (Just (LaterDependency dmn))
                 -- If one of the deps (even though it may have previous result
                 -- available) is not in the prebuilt, we should add the module
                 -- in the rebuild queue (where it will be checked against deps'
                 -- changes).
-                _ | any isNothing modTimes' -> toRebuild (Nothing, pb)
-                _ -> toPrebuilt pb
+                _ | any isNothing modTimes' -> toRebuild Nothing
+                -- A moved file does not necessarily need to be rebuilt, but
+                -- we need to patch the source spans in its externs and
+                -- record it as a diff
+                _ | upToDate == FilePathChanged -> toRebuild Nothing
+                _ -> isPrebuilt
         where
-          toRebuild (mbReason, t) = (M.insert mn (mbReason, Just t) build, prebuilt)
-          toPrebuilt v = (build, M.insert mn v prebuilt)
+          toRebuild mbReason = (M.insert mn (mbReason, Just pb) build, prebuilt)
+          isPrebuilt = (build, M.insert mn pb prebuilt)
 
 maximumMaybe :: Ord a => [(ModuleName, a)] -> Maybe (ModuleName, a)
 maximumMaybe [] = Nothing

@@ -136,12 +136,24 @@ spec = do
     it "does not recompile if the file path for a module has changed" $ do
       let content = "module Module where\nfoo = 0\n"
 
-      writeModule "Module" content
+      writeModule "Module1" content
       compileAll >>= expectCompiled ["Module"]
-      deleteModule "Module"
+      deleteModule "Module1"
 
       writeModule "Module2" content
-      compileAll >>= expectCompiled []
+      compileAll >>= completelyRenamed ["Module1"] []
+
+    it "replaces file paths downstream" $ do
+      let content = "module Module where\ntype Foo = Int\n"
+      let downstream = "module Downstream where\nimport Module (Foo)\nbar :: Foo\nbar = 0\n"
+
+      writeModule "Module1" content
+      writeModule "Downstream" downstream
+      compileAll >>= expectCompiled ["Module", "Downstream"]
+      deleteModule "Module1"
+
+      writeModule "Module2" content
+      compileAll >>= completelyRenamed ["Module1"] []
 
     it "does not necessarily recompile modules which were not part of the previous batch" $ do
       writeModule "A" "module A where\nfoo = 0\n"
@@ -507,6 +519,17 @@ spec = do
     expectCompiledWithFailure mns r = do
       compiled <- assertFailure r
       compiled `shouldBe` moduleNames mns
+
+    completelyRenamed oldNames mns r = do
+      compiled <- assertSuccess r
+      compiled `shouldBe` moduleNames mns
+      case r of
+        ((Left _, _), _) -> fail "already caught"
+        ((Right allExterns, _), _) -> do
+          -- Print the externs to text
+          let externsContents = T.pack $ show allExterns
+          -- And verify that none of the old names still show up
+          filter (`T.isInfixOf` externsContents) oldNames `shouldBe` []
 
 
 utcMidnightOnDate :: Integer -> Int -> Int -> UTCTime

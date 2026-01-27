@@ -307,6 +307,7 @@ make' MakeOptions{..} ma@MakeActions{..} ms = do
         Nothing -> pure $ case prevResult of
             Just (exts, warnings) -> do
               -- Previously built warnings already contain parser warnings.
+              -- FIXME: handle file moved?
               BuildJobSucceeded Nothing warnings exts (Just (ED.emptyDiff moduleName))
             Nothing ->
               BuildJobSkipped
